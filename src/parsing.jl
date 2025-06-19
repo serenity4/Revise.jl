@@ -1,7 +1,7 @@
 struct DoNotParse end
 
 """
-    mexs = parse_source(filename::AbstractString, mod::Module)
+    mexs = parse_source(mapexpr, filename::AbstractString, mod::Module)
 
 Parse the source `filename`, returning a [`ModuleExprsSigs`](@ref) `mexs`.
 `mod` is the "parent" module for the file (i.e., the one that `include`d the file);
@@ -9,8 +9,8 @@ if `filename` defines more module(s) then these will all have separate entries i
 
 If parsing `filename` fails, `nothing` is returned.
 """
-parse_source(filename, mod::Module; kwargs...) =
-    parse_source!(ModuleExprsSigs(mod), filename, mod; kwargs...)
+parse_source(@nospecialize(mapexpr), filename, mod::Module; kwargs...) =
+    parse_source!(ModuleExprsSigs(mod), mapexpr, filename, mod; kwargs...)
 
 """
     parse_source!(mexs::ModuleExprsSigs, filename, mod::Module)
@@ -21,12 +21,12 @@ Top-level parsing of `filename` as included into module
 
 See also [`Revise.parse_source`](@ref).
 """
-function parse_source!(mod_exprs_sigs::ModuleExprsSigs, filename::AbstractString, mod::Module; kwargs...)
+function parse_source!(mod_exprs_sigs::ModuleExprsSigs, @nospecialize(mapexpr), filename::AbstractString, mod::Module; kwargs...)
     if !isfile(filename)
         @warn "$filename is not a file, omitting from revision tracking"
         return nothing
     end
-    parse_source!(mod_exprs_sigs, read(filename, String), filename, mod; kwargs...)
+    parse_source!(mapexpr, mod_exprs_sigs, read(filename, String), filename, mod; kwargs...)
 end
 
 """
@@ -37,10 +37,20 @@ string. `pos` is the 1-based byte offset from which to begin parsing `src`.
 
 See also [`Revise.parse_source`](@ref).
 """
-function parse_source!(mod_exprs_sigs::ModuleExprsSigs, src::AbstractString, filename::AbstractString, mod::Module; kwargs...)
+function parse_source!(mod_exprs_sigs::ModuleExprsSigs, @nospecialize(mapexpr), src::AbstractString, filename::AbstractString, mod::Module, kwargs...)
     startswith(src, "# REVISE: DO NOT PARSE") && return DoNotParse()
     ex = Base.parse_input_line(src; filename=filename)
     ex === nothing && return mod_exprs_sigs
+    if mapexpr !== identity
+        try
+            ex = mapexpr(ex)
+        catch err
+            bt = trim_toplevel!(catch_backtrace())
+            lnn = firstline(ex)
+            loc = location_string((lnn.file, lnn.line))
+            throw(ReviseEvalException(loc, err, Any[(sf, 1) for sf in stacktrace(bt)]))
+        end
+    end
     if isexpr(ex, :error) || isexpr(ex, :incomplete)
         eval(ex)
     end

@@ -40,32 +40,32 @@ function _precompile_()
 
     MI = CodeTrackingMethodInfo
     @warnpcfail precompile(Tuple{typeof(minimal_evaluation!), Any, MI, Module, Core.CodeInfo, Symbol})
-    @warnpcfail precompile(Tuple{typeof(methods_by_execution!), Compiled, MI, DocExprs, Module, Expr})
-    @warnpcfail precompile(Tuple{typeof(methods_by_execution!), Compiled, MI, DocExprs, Frame, Vector{Bool}})
+    @warnpcfail precompile(Tuple{typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Module, Expr})
+    @warnpcfail precompile(Tuple{typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Frame, Vector{Bool}})
     @warnpcfail precompile(Tuple{typeof(Core.kwfunc(methods_by_execution!)),
                              NamedTuple{(:mode,),Tuple{Symbol}},
-                             typeof(methods_by_execution!), Compiled, MI, DocExprs, Module, Expr})
+                             typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Module, Expr})
     @warnpcfail precompile(Tuple{typeof(Core.kwfunc(methods_by_execution!)),
                              NamedTuple{(:skip_include,),Tuple{Bool}},
-                             typeof(methods_by_execution!), Compiled, MI, DocExprs, Module, Expr})
+                             typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Module, Expr})
     @warnpcfail precompile(Tuple{typeof(Core.kwfunc(methods_by_execution!)),
                              NamedTuple{(:mode, :skip_include),Tuple{Symbol,Bool}},
-                             typeof(methods_by_execution!), Compiled, MI, DocExprs, Module, Expr})
+                             typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Module, Expr})
     @warnpcfail precompile(Tuple{typeof(Core.kwfunc(methods_by_execution!)),
                              NamedTuple{(:mode,),Tuple{Symbol}},
-                             typeof(methods_by_execution!), Compiled, MI, DocExprs, Frame, Vector{Bool}})
+                             typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Frame, Vector{Bool}})
     @warnpcfail precompile(Tuple{typeof(Core.kwfunc(methods_by_execution!)),
                              NamedTuple{(:mode, :skip_include),Tuple{Symbol,Bool}},
-                             typeof(methods_by_execution!), Compiled, MI, DocExprs, Frame, Vector{Bool}})
+                             typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Frame, Vector{Bool}})
 
-    mex = which(methods_by_execution!, (Compiled, MI, DocExprs, Module, Expr))
+    mex = which(methods_by_execution!, (Compiled, MI, DocExprs, MapExprs, Module, Expr))
     mbody = bodymethod(mex)
     # use `typeof(pairs(NamedTuple()))` here since it actually differs between Julia versions
-    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, typeof(pairs(NamedTuple())), typeof(methods_by_execution!), Compiled, MI, DocExprs, Module, Expr})
-    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, Iterators.Pairs{Symbol,Bool,Tuple{Symbol},NamedTuple{(:skip_include,),Tuple{Bool}}}, typeof(methods_by_execution!), Compiled, MI, DocExprs, Module, Expr})
-    mfr = which(methods_by_execution!, (Compiled, MI, DocExprs, Frame, Vector{Bool}))
+    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, typeof(pairs(NamedTuple())), typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Module, Expr})
+    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, Bool, Iterators.Pairs{Symbol,Bool,Tuple{Symbol},NamedTuple{(:skip_include,),Tuple{Bool}}}, typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Module, Expr})
+    mfr = which(methods_by_execution!, (Compiled, MI, DocExprs, MapExprs, Frame, Vector{Bool}))
     mbody = bodymethod(mfr)
-    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, typeof(methods_by_execution!), Compiled, MI, DocExprs, Frame, Vector{Bool}})
+    @warnpcfail precompile(Tuple{mbody.sig.parameters[1], Symbol, Bool, typeof(methods_by_execution!), Compiled, MI, DocExprs, MapExprs, Frame, Vector{Bool}})
 
     @warnpcfail precompile(Tuple{typeof(hastrackedexpr), Expr, Vector{Any}})
     @warnpcfail precompile(Tuple{typeof(get_def), Method})
@@ -79,7 +79,7 @@ function _precompile_()
     @warnpcfail precompile(Tuple{typeof(push!), WatchList, Pair{String,PkgId}})
     @warnpcfail precompile(Tuple{typeof(pushex!), ExprsSigs, Expr})
     @warnpcfail precompile(Tuple{Type{ModuleExprsSigs}, Module})
-    @warnpcfail precompile(Tuple{Type{FileInfo}, Module, String})
+    @warnpcfail precompile(Tuple{Type{IncludeInfo}, Module, String})
     @warnpcfail precompile(Tuple{Type{PkgData}, PkgId})
     @warnpcfail precompile(Tuple{typeof(Base._deleteat!), Vector{Tuple{Module,String,Float64}}, Vector{Int}})
     @warnpcfail precompile(Tuple{typeof(add_require), String, Module, String, String, Expr})

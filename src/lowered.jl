@@ -23,7 +23,7 @@ add_signature!(methodinfo, @nospecialize(sig), ln) = push!(methodinfo, sig=>ln)
 push_expr!(methodinfo, mod::Module, ex::Expr) = methodinfo
 pop_expr!(methodinfo) = methodinfo
 add_dependencies!(methodinfo, be::CodeEdges, src, isrequired) = methodinfo
-add_includes!(methodinfo, mod::Module, filename) = methodinfo
+add_includes!(methodinfo, mapexpr, mod::Module, filename) = methodinfo
 
 function is_some_include(@nospecialize(f))
     @assert !isa(f, Core.SSAValue) && !isa(f, JuliaInterpreter.SSAValue)
@@ -203,12 +203,13 @@ end
 function methods_by_execution(mod::Module, ex::Expr; kwargs...)
     methodinfo = MethodInfo()
     docexprs = DocExprs()
-    value, frame = methods_by_execution!(JuliaInterpreter.Compiled(), methodinfo, docexprs, mod, ex; kwargs...)
+    mapexprs = MapExprs()
+    value, frame = methods_by_execution!(JuliaInterpreter.Compiled(), methodinfo, docexprs, mapexprs, mod, ex; kwargs...)
     return methodinfo, docexprs, frame
 end
 
 """
-    methods_by_execution!([interp::Interpreter=JuliaInterpreter.Compiled(),] methodinfo, docexprs::DocExprs, mod::Module, ex::Expr;
+    methods_by_execution!([interp::Interpreter=JuliaInterpreter.Compiled(),] methodinfo, docexprs::DocExprs, mapexprs::MapExprs, mod::Module, ex::Expr;
                           mode=:eval, disablebp=true, skip_include=mode!==:eval, always_rethrow=false)
 
 Evaluate or analyze `ex` in the context of `mod`.
@@ -218,6 +219,7 @@ evaluation needed to extract method signatures.
 likely choices are `JuliaInterpreter.Compiled()` or `JuliaInterpreter.RecursiveInterpreter()`.
 `methodinfo` is a cache for storing information about any method definitions (see [`CodeTrackingMethodInfo`](@ref)).
 `docexprs` is a cache for storing documentation expressions; obtain an empty one with `Revise.DocExprs()`.
+`mapexprs` is a cache for storing `mapexpr` arguments for calls to `include(mapexpr, file)`; obtain an empty one with `Revise.MapExprs()`.
 
 # Extended help
 
@@ -251,7 +253,7 @@ The other keyword arguments are more straightforward:
   If false, the error is logged with `@error`. `InterruptException`s are always rethrown.
   This is primarily useful for debugging.
 """
-function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExprs, mod::Module, ex::Expr;
+function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExprs, mapexprs::MapExprs, mod::Module, ex::Expr;
                                mode::Symbol=:eval, disablebp::Bool=true, always_rethrow::Bool=false, kwargs...)
     mode ∈ (:sigs, :eval, :evalmeth, :evalassign) || error("unsupported mode ", mode)
     lwr = Meta.lower(mod, ex)
@@ -295,7 +297,7 @@ function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExp
             foreach(disable, active_bp_refs)
         end
         ret = try
-            methods_by_execution!(interp, methodinfo, docexprs, frame, isrequired; mode, kwargs...)
+            methods_by_execution!(interp, methodinfo, docexprs, mapexprs, frame, isrequired; mode, kwargs...)
         catch err
             (always_rethrow || isa(err, InterruptException)) && (disablebp && foreach(enable, active_bp_refs); rethrow(err))
             loc = location_string(whereis(frame))
@@ -313,10 +315,10 @@ function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExp
     end
     return ret, lwr
 end
-methods_by_execution!(methodinfo, docexprs::DocExprs, mod::Module, ex::Expr; kwargs...) =
-    methods_by_execution!(Compiled(), methodinfo, docexprs, mod, ex; kwargs...)
+methods_by_execution!(methodinfo, docexprs::DocExprs, mapexprs::MapExprs, mod::Module, ex::Expr; kwargs...) =
+    methods_by_execution!(Compiled(), methodinfo, docexprs, mapexprs, mod, ex; kwargs...)
 
-function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExprs, frame::Frame, isrequired::AbstractVector{Bool};
+function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExprs, mapexprs::MapExprs, frame::Frame, isrequired::AbstractVector{Bool};
                                mode::Symbol=:eval, skip_include::Bool=true)
     isok(lnn::LineTypes) = !iszero(lnn.line) || lnn.file !== :none   # might fail either one, but accept anything
 
@@ -339,7 +341,7 @@ function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExp
                 local value
                 for ex in stmt.args
                     ex isa Expr || continue
-                    value = methods_by_execution!(interp, methodinfo, docexprs, mod, ex; mode, disablebp=false, skip_include)
+                    value = methods_by_execution!(interp, methodinfo, docexprs, mapexprs, mod, ex; mode, disablebp=false, skip_include)
                 end
                 isassign(frame, pc) && assign_this!(frame, value)
                 pc = next_or_nothing!(frame)
@@ -499,7 +501,7 @@ function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExp
                         end
                         newex = unwrap(newex)
                         push_expr!(methodinfo, newmod, newex)
-                        value = methods_by_execution!(interp, methodinfo, docexprs, newmod, newex; mode, skip_include, disablebp=false)
+                        value = methods_by_execution!(interp, methodinfo, docexprs, mapexprs, newmod, newex; mode, skip_include, disablebp=false)
                         pop_expr!(methodinfo)
                     end
                     assign_this!(frame, value)
@@ -508,25 +510,26 @@ function methods_by_execution!(interp::Interpreter, methodinfo, docexprs::DocExp
                     # include calls need to be managed carefully from several standpoints, including
                     # path management and parsing new expressions
                     if length(stmt.args) == 2
-                        add_includes!(methodinfo, mod, lookup(interp, frame, stmt.args[2]))
+                        add_includes!(methodinfo, nothing, mod, lookup(interp, frame, stmt.args[2]))
                     elseif length(stmt.args) == 3
-                        add_includes!(methodinfo, lookup(interp, frame, stmt.args[2]), lookup(interp, frame, stmt.args[3]))
+                        add_includes!(methodinfo, nothing, lookup(interp, frame, stmt.args[2]), lookup(interp, frame, stmt.args[3]))
                     else
                         error("Bad call to Core.include")
                     end
                     assign_this!(frame, nothing)  # FIXME: the file might return something different from `nothing`
                     pc = next_or_nothing!(frame)
-                elseif skip_include && f === Base.include
-                    if length(stmt.args) == 2
-                        add_includes!(methodinfo, mod, lookup(interp, frame, stmt.args[2]))
-                    else # either include(module, path) or include(mapexpr, path)
+                elseif skip_include && f === Base.include && length(stmt.args) ≤ 4
+                    mapexpr = nothing
+                    include_mod = mod
+                    include_path = lookup(interp, frame, stmt.args[end])
+                    if length(stmt.args) == 3 # either include(module, path) or include(mapexpr, path)
                         mod_or_mapexpr = lookup(interp, frame, stmt.args[2])
-                        if isa(mod_or_mapexpr, Module)
-                            add_includes!(methodinfo, mod_or_mapexpr, lookup(interp, frame, stmt.args[3]))
-                        else
-                            error("include(mapexpr, path) is not supported") # TODO (issue #634)
-                        end
+                        isa(mod_or_mapexpr, Module) ? (include_mod = mod_or_mapexpr) : (mapexpr = mod_or_mapexpr)
+                    elseif length(stmt.args) == 4 # include(mapexpr, module, path)
+                        mapexpr = lookup(interp, frame, stmt.args[2])
+                        include_mod = lookup(interp, frame, stmt.args[3])
                     end
+                    add_includes!(methodinfo, mapexpr, include_mod, include_path)
                     assign_this!(frame, nothing)  # FIXME: the file might return something different from `nothing`
                     pc = next_or_nothing!(frame)
                 elseif f === Base.Docs.doc! # && mode !== :eval

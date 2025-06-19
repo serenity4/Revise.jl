@@ -56,7 +56,7 @@ function parse_pkg_files(id::PkgId)
                 fname = relpath(chi.filename, pkgdata)
                 # For precompiled packages, we can read the source later (whenever we need it)
                 # from the *.ji cachefile.
-                push!(pkgdata, fname=>FileInfo(mod, cachefile))
+                push!(pkgdata, fname=>IncludeInfo(identity, mod, cachefile))
             end
             CodeTracking._pkgfiles[id] = pkgdata.info
             return pkgdata
@@ -90,11 +90,11 @@ function modulefiles(mod::Module)
         end
         filedata = Base._included_files
         included_files = filter(mf->mf[1] == mod, filedata)
-        return keypath(parentfile), [keypath(mf[2]) for mf in included_files]
+        return keypath(parentfile), [identity => keypath(mf[2]) for mf in included_files]
     end
     use_compiled_modules() || return nothing, nothing   # FIXME: support non-precompiled packages
     _, filedata, reqs = pkg_fileinfo(id)
     filedata === nothing && return nothing, nothing
     included_files = filter(mf->mf.id == id, filedata)
-    return keypath(parentfile), [keypath(mf.filename) for mf in included_files]
+    return keypath(parentfile), [identity => keypath(mf.filename) for mf in included_files]
 end

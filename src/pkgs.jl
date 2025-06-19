@@ -42,16 +42,16 @@ function queue_includes!(pkgdata::PkgData, id::PkgId)
     modstring = id.name
     delids = Int[]
     for i = 1:length(included_files)
-        mod, fname = included_files[i]
+        mod, (mapexpr, fname) = included_files[i]
         if mod == Base.__toplevel__
             mod = Main
         end
         modname = String(Symbol(mod))
         if startswith(modname, modstring) || endswith(fname, modstring*".jl")
-            modexsigs = parse_source(fname, mod)
+            modexsigs = parse_source(mapexpr, fname, mod)
             if modexsigs !== nothing
                 fname = relpath(fname, pkgdata)
-                push!(pkgdata, fname=>FileInfo(modexsigs))
+                push!(pkgdata, fname=>IncludeInfo(mapexpr, modexsigs))
             end
             push!(delids, i)
         end
@@ -82,7 +82,7 @@ function remove_from_included_files(modsym::Symbol)
     i = 1
     modstring = string(modsym)
     while i <= length(included_files)
-        mod, fname = included_files[i]
+        mod, (mapexpr, fname) = included_files[i]
         modname = String(Symbol(mod))
         if startswith(modname, modstring) || endswith(fname, modstring*".jl")
             deleteat!(included_files, i)
@@ -107,71 +107,76 @@ end
 
 function maybe_parse_from_cache!(pkgdata::PkgData, file::AbstractString)
     if startswith(file, "REPL[")
-        return add_definitions_from_repl(file)
+        return [add_definitions_from_repl(file)]
     end
-    fi = fileinfo(pkgdata, file)
-    if (isempty(fi.modexsigs) && !fi.parsed[]) && (!isempty(fi.cachefile) || !isempty(fi.cacheexprs))
+    infos = includeinfos(pkgdata, file)
+    for info in infos
+        isempty(info.modexsigs) && !info.parsed[] || continue
+        !isempty(info.cachefile) || !isempty(info.cacheexprs) || continue
         # Source was never parsed, get it from the precompile cache
         src = read_from_cache(pkgdata, file)
         filep = joinpath(basedir(pkgdata), file)
         filec = get(cache_file_key, filep, filep)
-        topmod = first(keys(fi.modexsigs))
-        ret = parse_source!(fi.modexsigs, src, filec, topmod)
+        topmod = first(keys(info.modexsigs))
+        ret = parse_source!(info.modexsigs, info.mapexpr, src, filec, topmod)
         if ret === nothing
             @error "failed to parse cache file source text for $file"
         end
         if ret !== DoNotParse()
-            add_modexs!(fi, fi.cacheexprs)
-            empty!(fi.cacheexprs)
+            add_modexs!(info, info.cacheexprs)
+            empty!(info.cacheexprs)
         end
-        fi.parsed[] = true
+        info.parsed[] = true
     end
-    return fi
+    return infos
 end
 
-function add_modexs!(fi::FileInfo, modexs)
+function add_modexs!(info::IncludeInfo, modexs)
     for (mod, rex) in modexs
-        exsigs = get(fi.modexsigs, mod, nothing)
+        exsigs = get(info.modexsigs, mod, nothing)
         if exsigs === nothing
-            fi.modexsigs[mod] = exsigs = ExprsSigs()
+            info.modexsigs[mod] = exsigs = ExprsSigs()
         end
         pushex!(exsigs, rex)
     end
-    return fi
+    return info
 end
 
-function maybe_extract_sigs!(fi::FileInfo)
-    if !fi.extracted[]
-        instantiate_sigs!(fi.modexsigs)
-        fi.extracted[] = true
+function maybe_extract_sigs!(info::IncludeInfo)
+    if !info.extracted[]
+        instantiate_sigs!(info.modexsigs)
+        info.extracted[] = true
     end
-    return fi
+    return info
 end
 maybe_extract_sigs!(pkgdata::PkgData, file::AbstractString) = maybe_extract_sigs!(fileinfo(pkgdata, file))
 
 function maybe_add_includes_to_pkgdata!(pkgdata::PkgData, file::AbstractString, includes; eval_now::Bool=false)
-    for (mod, inc) in includes
+    for (mod, (mapexpr, inc)) in includes
         inc = joinpath(splitdir(file)[1], inc)
         incrp = relpath(inc, pkgdata)
-        hasfile = false
+        hasinclude = false
         for srcfile in srcfiles(pkgdata)
-            if srcfile == incrp
-                hasfile = true
-                break
+            srcfile == incrp || continue
+            for info in pkgdata.info
+                info.mapexpr === mapexpr || continue
+                hasinclude = true
+                @goto found
             end
         end
-        if !hasfile
+        @label found
+        if !hasinclude
             # Add the file to pkgdata
             push!(pkgdata.info.files, incrp)
-            fi = FileInfo(mod)
-            push!(pkgdata.fileinfos, fi)
+            info = IncludeInfo(mapexpr, mod)
+            push!(pkgdata.includeinfos, info)
             # Parse the source of the new file
             fullfile = joinpath(basedir(pkgdata), incrp)
             if isfile(fullfile)
-                parse_source!(fi.modexsigs, fullfile, mod)
+                parse_source!(info.modexsigs, fullfile, mod)
                 if eval_now
                     # Use runtime dispatch to reduce latency
-                    Base.invokelatest(instantiate_sigs!, fi.modexsigs; mode=:eval)
+                    Base.invokelatest(instantiate_sigs!, info.modexsigs; mode=:eval)
                 end
             end
             # Add to watchlist
@@ -194,23 +199,26 @@ function add_require(sourcefile::String, modcaller::Module, idmod::String, modna
 
     lock(requires_lock)
     try
-        # Get/create the FileInfo specifically for tracking @require blocks
+        # Get/create the IncludeInfo specifically for tracking @require blocks
         pkgdata = pkgdatas[id]
         filekey = relpath(sourcefile, pkgdata) * "__@require__"
-        fileidx = fileindex(pkgdata, filekey)
-        if fileidx === nothing
+        indices = includeindices(pkgdata, filekey)
+        if indices === nothing
             files = srcfiles(pkgdata)
             fileidx = length(files) + 1
             push!(files, filekey)
-            push!(pkgdata.fileinfos, FileInfo(modcaller))
+            push!(pkgdata.includeinfos, IncludeInfo(identity, modcaller))
+        else
+            @assert length(indices) == 1
+            fileidx = indices[1]
         end
-        fi = pkgdata.fileinfos[fileidx]
+        info = pkgdata.includeinfos[fileidx]
         # Tag the expr to ensure it is unique
         expr = Expr(:block, copy(expr))
         push!(expr.args, :(const __pkguuid__ = $idmod))
         # Add the expression to the fileinfo
         complex = true     # is this too complex to delay?
-        if !fi.extracted[]
+        if !info.extracted[]
             # If we haven't yet extracted signatures, do our best to avoid it now in case the
             # signature-extraction code has not yet been compiled (latency reduction)
             includes, complex = deferrable_require(expr)
@@ -221,11 +229,11 @@ function add_require(sourcefile::String, modcaller::Module, idmod::String, modna
                     push!(modincludes, (modcaller, inc))
                 end
                 maybe_add_includes_to_pkgdata!(pkgdata, filekey, modincludes)
-                if isempty(fi.modexsigs)
+                if isempty(info.modexsigs)
                     # Source has not even been parsed
-                    push!(fi.cacheexprs, (modcaller, expr))
+                    push!(info.cacheexprs, (modcaller, expr))
                 else
-                    add_modexs!(fi, [(modcaller, expr)])
+                    add_modexs!(info, [(modcaller, expr)])
                 end
             end
         end
@@ -265,7 +273,7 @@ function deferrable_require!(includes, expr::Expr)
 end
 
 function eval_require_now(pkgdata::PkgData, fileidx::Int, filekey::String, sourcefile::String, modcaller::Module, expr::Expr)
-    fi = pkgdata.fileinfos[fileidx]
+    info = pkgdata.includeinfos[fileidx]
     exsnew = ExprsSigs()
     exsnew[RelocatableExpr(expr)] = nothing
     mexsnew = ModuleExprsSigs(modcaller=>exsnew)
@@ -275,7 +283,7 @@ function eval_require_now(pkgdata::PkgData, fileidx::Int, filekey::String, sourc
     tls[:SOURCE_PATH] = sourcefile
     # Now execute the expression
     mexsnew, includes = try
-        eval_new!(mexsnew, fi.modexsigs)
+        eval_new!(mexsnew, info.modexsigs)
     finally
         if prev === nothing
             delete!(tls, :SOURCE_PATH)
@@ -284,7 +292,7 @@ function eval_require_now(pkgdata::PkgData, fileidx::Int, filekey::String, sourc
         end
     end
     # Add any new methods or `include`d files to tracked objects
-    pkgdata.fileinfos[fileidx] = FileInfo(mexsnew, fi)
+    pkgdata.includeinfos[fileidx] = IncludeInfo(mexsnew, info)
     ret = maybe_add_includes_to_pkgdata!(pkgdata, filekey, includes; eval_now=true)
     return ret
 end

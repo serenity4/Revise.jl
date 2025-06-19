@@ -324,8 +324,8 @@ package manager.
 `src/indents.jl` is particularly simple:
 
 ```julia
-julia> pkgdata.fileinfos[2]
-FileInfo(Items=>ExprsSigs with the following expressions:
+julia> pkgdata.includeinfos[2]
+IncludeInfo(Items=>ExprsSigs with the following expressions:
   :(indent(::UInt16) = begin
           2
       end)
@@ -337,7 +337,7 @@ FileInfo(Items=>ExprsSigs with the following expressions:
 This is just a summary; to see the actual `def=>sigts` map, do the following:
 
 ```julia
-julia> pkgdata.fileinfos[2].modexsigs[Items]
+julia> pkgdata.includeinfos[2].modexsigs[Items]
 OrderedCollections.OrderedDict{Revise.RelocatableExpr,Union{Nothing, Array{Any,1}}} with 2 entries:
   :(indent(::UInt16) = begin…                       => Any[Tuple{typeof(indent),UInt16}]
   :(indent(::UInt8) = begin…                        => Any[Tuple{typeof(indent),UInt8}]
@@ -346,8 +346,8 @@ OrderedCollections.OrderedDict{Revise.RelocatableExpr,Union{Nothing, Array{Any,1
 These are populated now because we specified `__precompile__(false)`, which forces
 Revise to defensively parse all expressions in the package in case revisions are made
 at some future point.
-For precompiled packages, each `pkgdata.fileinfos[i]` can instead rely on the `cachefile`
-(another field stored in the [`Revise.FileInfo`](@ref)) as a record of the state of the file
+For precompiled packages, each `pkgdata.includeinfos[i]` can instead rely on the `cachefile`
+(another field stored in the [`Revise.IncludeInfo`](@ref)) as a record of the state of the file
 at the time the package was loaded; as a consequence, Revise can defer parsing the source
 file(s) until they are updated.
 

@@ -170,7 +170,7 @@ Global variable, `included_files` gets populated by callbacks we register with `
 It's used to track non-precompiled packages and, optionally, user scripts (see docs on
 `JULIA_REVISE_INCLUDE`).
 """
-const included_files = Tuple{Module,String}[]  # (module, filename)
+const included_files = Tuple{Module,Pair{Function,String}}[]  # (module, (mapexpr => filename))
 
 """
     Revise.basesrccache
@@ -404,7 +404,7 @@ end
 # These are typically bypassed in favor of expression-by-expression evaluation to
 # allow handling of new `include` statements.
 function eval_new!(exs_sigs_new::ExprsSigs, exs_sigs_old, mod::Module; mode::Symbol=:eval)
-    includes = Vector{Pair{Module,String}}()
+    includes = Vector{Pair{Module,Pair{Any,String}}}()
     for rex in keys(exs_sigs_new)
         sigs, _includes = eval_rex(rex, exs_sigs_old, mod; mode=mode)
         if sigs !== nothing
@@ -448,14 +448,14 @@ It also has the following fields:
 - `deps`: list of top-level named objects (`Symbol`s and `GlobalRef`s) that method definitions
   in this block depend on. For example, `if Sys.iswindows() f() = 1 else f() = 2 end` would
   store `Sys.iswindows` here.
-- `includes`: a list of `module=>filename` for any `include` statements encountered while the
+- `includes`: a list of `module=>(mapexpr=>filename)` for any `include` statements encountered while the
   expression was parsed.
 """
 struct CodeTrackingMethodInfo
     exprstack::Vector{Expr}
     allsigs::Vector{Any}
     deps::Set{Union{GlobalRef,Symbol}}
-    includes::Vector{Pair{Module,String}}
+    includes::Vector{Pair{Module,Pair{Any,String}}}
 end
 CodeTrackingMethodInfo(ex::Expr) = CodeTrackingMethodInfo([ex], Any[], Set{Union{GlobalRef,Symbol}}(), Pair{Module,String}[])
 
@@ -506,8 +506,8 @@ function add_dependencies!(methodinfo::CodeTrackingMethodInfo, edges::CodeEdges,
     # end
     return methodinfo
 end
-function add_includes!(methodinfo::CodeTrackingMethodInfo, mod::Module, filename)
-    push!(methodinfo.includes, mod=>filename)
+function add_includes!(methodinfo::CodeTrackingMethodInfo, @nospecialize(mapexpr), mod::Module, filename)
+    push!(methodinfo.includes, mod=>(mapexpr=>filename))
     return methodinfo
 end
 
@@ -515,7 +515,8 @@ end
 function eval_with_signatures(mod, ex::Expr; mode=:eval, kwargs...)
     methodinfo = CodeTrackingMethodInfo(ex)
     docexprs = DocExprs()
-    frame = methods_by_execution!(methodinfo, docexprs, mod, ex; mode=mode, kwargs...)[2]
+    mapexprs = MapExprs()
+    frame = methods_by_execution!(methodinfo, docexprs, mapexprs, mod, ex; mode=mode, kwargs...)[2]
     return methodinfo.allsigs, methodinfo.deps, methodinfo.includes, frame
 end
 
@@ -696,34 +697,38 @@ function revise_file_queued(pkgdata::PkgData, file)
     return
 end
 
-# Because we delete first, we have to make sure we've parsed the file
 function handle_deletions(pkgdata, file)
-    fi = maybe_parse_from_cache!(pkgdata, file)
-    maybe_extract_sigs!(fi)
-    mexsold = fi.modexsigs
     idx = fileindex(pkgdata, file)
-    filep = pkgdata.info.files[idx]
-    if isa(filep, AbstractString)
-        if file ≠ "."
-            filep = normpath(basedir(pkgdata), file)
-        else
-            filep = normpath(basedir(pkgdata))
-        end
-    end
-    topmod = first(keys(mexsold))
-    fileok = file_exists(String(filep)::String)
-    mexsnew = fileok ? parse_source(filep, topmod) : ModuleExprsSigs(topmod)
-    if mexsnew !== nothing && mexsnew !== DoNotParse()
-        delete_missing!(mexsold, mexsnew)
+    path = normalize_file_path(pkgdata.info.files[idx])
+    fileok = file_exists(String(path)::String)
+    diff = Tuple{ModuleExprsSigs,ModuleExprsSigs}[]
+    # Because we delete first, we have to make sure we've parsed the file
+    for info in maybe_parse_from_cache!(pkgdata, path)
+        maybe_extract_sigs!(info)
+        mexsnew, mexsold = handle_deletions(pkgdata::PkgData, path, info::IncludeInfo)
+        push!(diff, (mexsnew, mexsold))
     end
     if !fileok
-        @warn("$filep no longer exists, deleted all methods")
-        deleteat!(pkgdata.fileinfos, idx)
+        @warn("$path no longer exists, deleted all methods")
+        splice!(pkgdata.includeinfos, includeindices(info, file))
         deleteat!(pkgdata.info.files, idx)
         wl = get(watched_files, basedir(pkgdata), nothing)
-        if isa(wl, WatchList)
-            delete!(wl.trackedfiles, file)
-        end
+        isa(wl, WatchList) && delete!(wl.trackedfiles, file)
+    end
+    return diff
+end
+
+function normalize_file_path(file)
+    isa(file, AbstractString) || return file
+    return file ≠ "." ? normpath(basedir(pkgdata), file) : normpath(basedir(pkgdata))
+end
+
+function handle_deletions(pkgdata::PkgData, path, info::IncludeInfo)
+    mexsold = info.modexsigs
+    topmod = first(keys(mexsold))
+    mexsnew = fileok ? parse_source(info.mapexpr, path, topmod) : ModuleExprsSigs(topmod)
+    if mexsnew !== nothing && mexsnew !== DoNotParse()
+        delete_missing!(mexsold, mexsnew)
     end
     return mexsnew, mexsold
 end
@@ -738,21 +743,23 @@ Note that generally it is better to use [`revise`](@ref) as it properly handles 
 that move from one file to another.
 
 `id` must be a key in [`Revise.pkgdatas`](@ref), and `file` a key in
-`Revise.pkgdatas[id].fileinfos`.
+`Revise.pkgdatas[id].includeinfos`.
 """
 function revise_file_now(pkgdata::PkgData, file)
     # @assert !isabspath(file)
-    i = fileindex(pkgdata, file)
-    if i === nothing
+    indices = includeindices(pkgdata, file)
+    if isempty(indices)
         println("Revise is currently tracking the following files in $(PkgId(pkgdata)): ", srcfiles(pkgdata))
         error(file, " is not currently being tracked.")
     end
-    mexsnew, mexsold = handle_deletions(pkgdata, file)
-    if mexsnew != nothing
-        _, includes = eval_new!(mexsnew, mexsold)
-        fi = fileinfo(pkgdata, i)
-        pkgdata.fileinfos[i] = FileInfo(mexsnew, fi)
-        maybe_add_includes_to_pkgdata!(pkgdata, file, includes; eval_now=true)
+    for (mexsnew, mexsold) in handle_deletions(pkgdata, file)
+        mexsnew === nothing && continue
+        for i in indices
+            _, includes = eval_new!(mexsnew, mexsold)
+            info = includeinfo(pkgdata, i)
+            pkgdata.includeinfos[i] = IncludeInfo(mexsnew, info)
+            maybe_add_includes_to_pkgdata!(pkgdata, file, includes; eval_now=true)
+        end
     end
     nothing
 end
@@ -811,13 +818,15 @@ function revise(; throw=false)
         revision_errors = Tuple{PkgData,String}[]
         queue = sort!(collect(revision_queue); lt=pkgfileless)
         finished = eltype(revision_queue)[]
-        mexsnews = ModuleExprsSigs[]
+        mexsnews = Vector{ModuleExprsSigs}[]
         interrupt = false
         for (pkgdata, file) in queue
             try
-                mexsnew, _ = handle_deletions(pkgdata, file)
-                mexsnew === DoNotParse() && continue
-                push!(mexsnews, mexsnew)
+                for (i, (mexsnew, _)) in enumerate(handle_deletions(pkgdata, file))
+                    mexsnew === DoNotParse() && continue
+                    length(mexsnews) < i && push!(mexsnews, ModuleExprsSigs[])
+                    push!(mexsnews[end], mexsnew)
+                end
                 push!(finished, (pkgdata, file))
             catch err
                 throw && Base.throw(err)
@@ -827,51 +836,55 @@ function revise(; throw=false)
             end
         end
         # Do the evaluation
-        for ((pkgdata, file), mexsnew) in zip(finished, mexsnews)
+        # XXX: This is largely unfinished.
+        for ((pkgdata, file), _mexsnews) in zip(finished, mexsnews)
             defaultmode = PkgId(pkgdata).name == "Main" ? :evalmeth : :eval
             i = fileindex(pkgdata, file)
             i === nothing && continue   # file was deleted by `handle_deletions`
-            fi = fileinfo(pkgdata, i)
-            modsremaining = Set(keys(mexsnew))
-            changed, err = true, nothing
-            while changed
-                changed = false
-                for (mod, exsnew) in mexsnew
-                    mod ∈ modsremaining || continue
-                    try
-                        mode = defaultmode
-                        # Allow packages to override the supplied mode
-                        if isdefined(mod, :__revise_mode__)
-                            mode = getfield(mod, :__revise_mode__)::Symbol
-                        end
-                        mode ∈ (:sigs, :eval, :evalmeth, :evalassign) || error("unsupported mode ", mode)
-                        exsold = get(fi.modexsigs, mod, empty_exs_sigs)
-                        for rex in keys(exsnew)
-                            sigs, includes = eval_rex(rex, exsold, mod; mode=mode)
-                            if sigs !== nothing
-                                exsnew[rex] = sigs
+            indices = includeindices(pkgdata, file)
+            for (idx, mexsnew) in zip(idx, _mexsnews)
+                info = pkgdata.includeinfos[idx]
+                modsremaining = Set(keys(mexsnew))
+                changed, err = true, nothing
+                while changed
+                    changed = false
+                    for (mod, exsnew) in mexsnew
+                        mod ∈ modsremaining || continue
+                        try
+                            mode = defaultmode
+                            # Allow packages to override the supplied mode
+                            if isdefined(mod, :__revise_mode__)
+                                mode = getfield(mod, :__revise_mode__)::Symbol
                             end
-                            if includes !== nothing
-                                maybe_add_includes_to_pkgdata!(pkgdata, file, includes; eval_now=true)
+                            mode ∈ (:sigs, :eval, :evalmeth, :evalassign) || error("unsupported mode ", mode)
+                            exsold = get(info.modexsigs, mod, empty_exs_sigs)
+                            for rex in keys(exsnew)
+                                sigs, includes = eval_rex(rex, exsold, mod; mode=mode)
+                                if sigs !== nothing
+                                    exsnew[rex] = sigs
+                                end
+                                if includes !== nothing
+                                    maybe_add_includes_to_pkgdata!(pkgdata, file, includes; eval_now=true)
+                                end
                             end
+                            delete!(modsremaining, mod)
+                            changed = true
+                        catch _err
+                            err = _err
                         end
-                        delete!(modsremaining, mod)
-                        changed = true
-                    catch _err
-                        err = _err
                     end
                 end
-            end
-            if isempty(modsremaining) || isa(err, LoweringException)   # fix #877
-                pkgdata.fileinfos[i] = FileInfo(mexsnew, fi)
-            end
-            if isempty(modsremaining)
-                delete!(queue_errors, (pkgdata, file))
-            else
-                throw && Base.throw(err)
-                interrupt |= isa(err, InterruptException)
-                push!(revision_errors, (pkgdata, file))
-                queue_errors[(pkgdata, file)] = (err, catch_backtrace())
+                if isempty(modsremaining) || isa(err, LoweringException)   # fix #877
+                    pkgdata.includeinfos[idx] = IncludeInfo(mexsnew, info)
+                end
+                if isempty(modsremaining)
+                    delete!(queue_errors, (pkgdata, file))
+                else
+                    throw && Base.throw(err)
+                    interrupt |= isa(err, InterruptException)
+                    push!(revision_errors, (pkgdata, file))
+                    queue_errors[(pkgdata, file)] = (err, catch_backtrace())
+                end
             end
         end
         if interrupt
@@ -977,7 +990,7 @@ function track(mod::Module, file; mode=:sigs, kwargs...)
         file = abspath(file)
     end
     # Set up tracking
-    fm = parse_source(file, mod; mode=mode)
+    fm = parse_source(identity, file, mod; mode=mode)
     if fm !== nothing
         if mode === :includet
             mode = :sigs   # we already handled evaluation in `parse_source`
@@ -994,7 +1007,7 @@ function track(mod::Module, file; mode=:sigs, kwargs...)
         if !haskey(CodeTracking._pkgfiles, id)
             CodeTracking._pkgfiles[id] = pkgdata.info
         end
-        push!(pkgdata, relpath(file, pkgdata)=>FileInfo(fm))
+        push!(pkgdata, relpath(file, pkgdata)=>IncludeInfo(identity, fm))
         init_watching(pkgdata, (String(file)::String,))
         pkgdatas[id] = pkgdata
     end
@@ -1168,7 +1181,7 @@ function get_def(method::Method; modified_files=revision_queue)
     if parentfile !== nothing
         def = get_def(method, pkgdata, relpath(parentfile, pkgdata))
         def !== nothing && return true
-        for modulefile in included_files
+        for (_, modulefile) in included_files
             def = get_def(method, pkgdata, relpath(modulefile, pkgdata))
             def !== nothing && return true
         end
@@ -1221,11 +1234,11 @@ function add_definitions_from_repl(filename::String)
     id = PkgId(nothing, "@REPL")
     pkgdata = pkgdatas[id]
     mexs = ModuleExprsSigs(Main::Module)
-    parse_source!(mexs, src, filename, Main::Module)
+    parse_source!(mexs, identity, src, filename, Main::Module)
     instantiate_sigs!(mexs)
-    fi = FileInfo(mexs)
-    push!(pkgdata, filename=>fi)
-    return fi
+    info = IncludeInfo(identity, mexs)
+    push!(pkgdata, filename=>info)
+    return info
 end
 add_definitions_from_repl(filename::AbstractString) = add_definitions_from_repl(convert(String, filename)::String)
 

@@ -17,6 +17,7 @@ end
 
 const DocExprs = Dict{Module,Vector{Expr}}
 const ExprsSigs = OrderedDict{RelocatableExpr,Union{Nothing,Vector{Any}}}
+const MapExprs = Dict{Module,Dict{Any,Any}}
 const DepDictVals = Tuple{Module,RelocatableExpr}
 const DepDict = Dict{Symbol,Set{DepDictVals}}
 
@@ -69,13 +70,13 @@ ModuleExprsSigs(mod::Module) = ModuleExprsSigs(mod=>ExprsSigs())
 Base.isempty(fm::ModuleExprsSigs) = length(fm) == 1 && isempty(first(values(fm)))
 
 """
-    FileInfo(mexs::ModuleExprsSigs, cachefile="")
+    IncludeInfo(mexs::ModuleExprsSigs, cachefile="")
 
 Structure to hold the per-module expressions found when parsing a
 single file.
 `mexs` holds the [`Revise.ModuleExprsSigs`](@ref) for the file.
 
-Optionally, a `FileInfo` can also record the path to a cache file holding the original source code.
+Optionally, a `IncludeInfo` can also record the path to a cache file holding the original source code.
 This is applicable only for precompiled modules and `Base`.
 (This cache file is distinct from the original source file that might be edited by the
 developer, and it will always hold the state
@@ -85,55 +86,57 @@ the original source code gets parsed only when a revision needs to be made.
 
 Source cache files greatly reduce the overhead of using Revise.
 """
-struct FileInfo
+struct IncludeInfo
+    mapexpr::Function
     modexsigs::ModuleExprsSigs
     cachefile::String
     cacheexprs::Vector{Tuple{Module,Expr}}             # "unprocessed" exprs, used to support @require
     extracted::Base.RefValue{Bool}                     # true if signatures have been processed from modexsigs
     parsed::Base.RefValue{Bool}                        # true if modexsigs have been parsed from cachefile
 end
-FileInfo(fm::ModuleExprsSigs, cachefile="") = FileInfo(fm, cachefile, Tuple{Module,Expr}[], Ref(false), Ref(false))
+IncludeInfo(@nospecialize(mapexpr), fm::ModuleExprsSigs, cachefile="") = IncludeInfo(mapexpr, fm, cachefile, Tuple{Module,Expr}[], Ref(false), Ref(false))
 
 """
-    FileInfo(mod::Module, cachefile="")
+    IncludeInfo(mod::Module, cachefile="")
 
-Initialize an empty FileInfo for a file that is `include`d into `mod`.
+Initialize an empty IncludeInfo for a file that is `include`d into `mod`.
 """
-FileInfo(mod::Module, cachefile::AbstractString="") = FileInfo(ModuleExprsSigs(mod), cachefile)
+IncludeInfo(@nospecialize(mapexpr), mod::Module, cachefile::AbstractString="") = IncludeInfo(mapexpr, ModuleExprsSigs(mod), cachefile)
 
-FileInfo(fm::ModuleExprsSigs, fi::FileInfo) = FileInfo(fm, fi.cachefile, copy(fi.cacheexprs), Ref(fi.extracted[]), Ref(fi.parsed[]))
+IncludeInfo(fm::ModuleExprsSigs, info::IncludeInfo) = IncludeInfo(info.mapexpr, fm, info.cachefile, copy(info.cacheexprs), Ref(info.extracted[]), Ref(info.parsed[]))
 
-function Base.show(io::IO, fi::FileInfo)
-    print(io, "FileInfo(")
-    for (mod, exsigs) in fi.modexsigs
+function Base.show(io::IO, info::IncludeInfo)
+    print(io, "IncludeInfo(")
+    for (mod, exsigs) in info.modexsigs
         show(io, mod)
         print(io, "=>")
         show(io, exsigs)
         print(io, ", ")
     end
-    if !isempty(fi.cachefile)
-        print(io, "with cachefile ", fi.cachefile)
+    info.mapexpr !== identity && print(io, "with mapexpr ", info.mapexpr, ", ")
+    if !isempty(info.cachefile)
+        print(io, "with cachefile ", info.cachefile)
     end
     print(io, ')')
 end
 
 """
-    PkgData(id, path, fileinfos::Dict{String,FileInfo})
+    PkgData(id, path, includeinfos::Dict{String,IncludeInfo})
 
 A structure holding the data required to handle a particular package.
 `path` is the top-level directory defining the package,
-and `fileinfos` holds the [`Revise.FileInfo`](@ref) for each file defining the package.
+and `includeinfos` holds the [`Revise.IncludeInfo`](@ref) for each file defining the package.
 
 For the `PkgData` associated with `Main` (e.g., for files loaded with [`includet`](@ref)),
 the corresponding `path` entry will be empty.
 """
 mutable struct PkgData
     info::PkgFiles
-    fileinfos::Vector{FileInfo}
+    includeinfos::Vector{IncludeInfo}
     requirements::Vector{PkgId}
 end
 
-PkgData(id::PkgId, path) = PkgData(PkgFiles(id, path), FileInfo[], PkgId[])
+PkgData(id::PkgId, path) = PkgData(PkgFiles(id, path), IncludeInfo[], PkgId[])
 PkgData(id::PkgId, ::Nothing) = PkgData(id, "")
 function PkgData(id::PkgId)
     bp = basepath(id)
@@ -157,23 +160,31 @@ function fileindex(info, file)
     return nothing
 end
 
+function includeindices(info, file)
+    indices = Int[]
+    for (i, f) in enumerate(srcfiles(info))
+        is_same_file(f, file) && push!(indices, i)
+    end
+    return indices
+end
+
 function hasfile(info, file)
     if isabspath(file)
         file = relpath(file, info)
     end
-    fileindex(info, file) !== nothing
+    !isempty(includeindices(info, file))
 end
 
-function fileinfo(pkgdata::PkgData, file::String)
-    i = fileindex(pkgdata, file)
-    i === nothing && error("file ", file, " not found")
-    return pkgdata.fileinfos[i]
+function includeinfos(pkgdata::PkgData, file::String)
+    indices = includeindices(pkgdata, file)
+    isempty(indices) && error("file ", file, " not found")
+    return [pkgdata.includeinfos[i] for i in indices]
 end
-fileinfo(pkgdata::PkgData, i::Int) = pkgdata.fileinfos[i]
+includeinfo(pkgdata::PkgData, i::Int) = pkgdata.includeinfos[i]
 
-function Base.push!(pkgdata::PkgData, pr::Pair{<:Any,FileInfo})
+function Base.push!(pkgdata::PkgData, pr::Pair{<:Any,IncludeInfo})
     push!(srcfiles(pkgdata), pr.first)
-    push!(pkgdata.fileinfos, pr.second)
+    push!(pkgdata.includeinfos, pr.second)
     return pkgdata
 end
 
@@ -183,7 +194,7 @@ function Base.show(io::IO, pkgdata::PkgData)
     if compact
         print(io, '"', pkgdata.info.basedir, "\", ")
         nexs, nsigs, nparsed = 0, 0, 0
-        for fi in pkgdata.fileinfos
+        for fi in pkgdata.includeinfos
             thisnexs, thisnsigs = 0, 0
             for (mod, exsigs) in fi.modexsigs
                 for (rex, sigs) in exsigs
@@ -198,11 +209,11 @@ function Base.show(io::IO, pkgdata::PkgData)
                 nparsed += 1
             end
         end
-        print(io, nparsed, '/', length(pkgdata.fileinfos), " parsed files, ", nexs, " expressions, ", nsigs, " signatures)")
+        print(io, nparsed, '/', length(pkgdata.includeinfos), " parsed includes, ", nexs, " expressions, ", nsigs, " signatures)")
     else
         show(io, pkgdata.info.id)
         println(io, ", basedir \"", pkgdata.info.basedir, "\":")
-        for (f, fi) in zip(pkgdata.info.files, pkgdata.fileinfos)
+        for (f, fi) in zip(pkgdata.info.files, pkgdata.includeinfos)
             print(io, "  \"", f, "\": ")
             show(IOContext(io, :compact=>true), fi)
             print(io, '\n')

@@ -72,7 +72,7 @@ function _track(id, modname; modified_files=revision_queue)
                     cache_file_key[fullpath] = filename
                     src_file_key[filename] = fullpath
                 end
-                push!(pkgdata, rpath=>FileInfo(submod, basesrccache))
+                push!(pkgdata, rpath=>IncludeInfo(identity, submod, basesrccache))
                 if mtime(ffilename) > mtcache
                     with_logger(_debug_logger) do
                         @debug "Recipe for Base/StdLib" _group="Watching" filename=filename mtime=mtime(filename) mtimeref=mtcache
@@ -166,16 +166,16 @@ function track_subdir_from_git!(pkgdata::PkgData, subdir::AbstractString; commit
             if src != read(fullpath, String)
                 push!(modified_files, (pkgdata, rpath))
             end
-            fi = FileInfo(fmod)
-            if parse_source!(fi.modexsigs, src, file, fmod) === nothing
+            info = IncludeInfo(identity, fmod)
+            if parse_source!(info.modexsigs, src, file, fmod) === nothing
                 @warn "failed to parse Git source text for $file"
             else
-                instantiate_sigs!(fi.modexsigs)
+                instantiate_sigs!(info.modexsigs)
             end
-            push!(pkgdata, rpath=>fi)
+            push!(pkgdata, rpath=>info)
         end
     end
-    if !isempty(pkgdata.fileinfos)
+    if !isempty(pkgdata.includeinfos)
         id = PkgId(pkgdata)
         CodeTracking._pkgfiles[id] = pkgdata.info
         init_watching(pkgdata, srcfiles(pkgdata))

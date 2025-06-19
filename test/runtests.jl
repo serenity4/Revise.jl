@@ -424,7 +424,7 @@ end
         Revise.maybe_parse_from_cache!(pkgdata, file)
         print(io, pkgdata)
         str = String(take!(io))
-        @test occursin("EponymTuples.jl\": FileInfo", str)
+        @test occursin("EponymTuples.jl\": IncludeInfo", str)
         @test occursin(r"with cachefile.*EponymTuples.*ji", str)
         print(IOContext(io, :compact=>true), pkgdata)
         str = String(take!(io))
@@ -529,8 +529,8 @@ end
                     end
                     """)  # just for fun we skipped the whitespace
                 @yry()
-                fi = pkgdata.fileinfos[1]
-                @test fi.extracted[]          # issue 596
+                info = pkgdata.includeinfos[1]
+                @test info.extracted[]          # issue 596
                 @eval @test $(fn1)() == -1
                 @eval @test $(fn2)() == 2
                 @eval @test $(fn3)() == 3
